@@ -93,18 +93,45 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     ]
 
     logger.info("Generating dummy %d-way network via netgenerate: %s", n_ways, " ".join(cmd))
-    
-    # Kaggle's LD_LIBRARY_PATH can mess up SUMO's netconvert (segfault)
-    env = os.environ.copy()
-    env.pop("LD_LIBRARY_PATH", None)
 
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+    # Build a minimal environment for SUMO binaries.
+    # Kaggle/Colab kernels inject LD_PRELOAD, LD_LIBRARY_PATH, CUDA vars,
+    # etc. that cause segfaults in native SUMO binaries.
+    _SAFE_ENV_KEYS = {
+        "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP",
+        "SUMO_HOME", "DISPLAY", "XDG_RUNTIME_DIR",
+    }
+    clean_env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+
+    result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True, timeout=30)
+
+    # Fallback: if segfault (exit -11), retry with absolute minimum env
+    if result.returncode == -11:
+        logger.warning(
+            "netgenerate segfaulted with clean env for %d-way, retrying with minimal env...",
+            n_ways,
+        )
+        minimal_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/usr/local/bin"),
+            "HOME": os.environ.get("HOME", "/root"),
+        }
+        sumo_home = os.environ.get("SUMO_HOME")
+        if sumo_home:
+            minimal_env["SUMO_HOME"] = sumo_home
+        result = subprocess.run(cmd, env=minimal_env, capture_output=True, text=True, timeout=30)
 
     if result.stderr:
         logger.warning("netgenerate stderr for %d-way: %s", n_ways, result.stderr.strip())
     if result.returncode != 0:
+        # Include diagnostic info in the error message
+        diag = (
+            f"exit_code={result.returncode}, "
+            f"stderr={result.stderr.strip()!r}, "
+            f"stdout={result.stdout.strip()!r}"
+        )
         raise RuntimeError(
-            f"netgenerate failed for {n_ways}-way (exit code {result.returncode}): {result.stderr}"
+            f"netgenerate failed for {n_ways}-way ({diag}). "
+            f"If running on Kaggle, try: !{' '.join(cmd)}"
         )
 
     if not os.path.isfile(net_filepath):
