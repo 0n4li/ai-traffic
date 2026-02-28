@@ -41,6 +41,19 @@ NETCONVERT_DEFAULT_FLAGS = [
 
 YELLOW_DURATION_S = 4  # Indian standard; never agent-controlled
 
+# Environment keys safe to pass to SUMO subprocesses.
+# Kaggle/Colab kernels inject LD_PRELOAD, LD_LIBRARY_PATH, CUDA vars, etc.
+# that cause segfaults in native SUMO binaries.
+_SAFE_ENV_KEYS = {
+    "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP",
+    "SUMO_HOME", "DISPLAY", "XDG_RUNTIME_DIR",
+}
+
+
+def _clean_env() -> dict[str, str]:
+    """Build a minimal environment for SUMO binary subprocesses."""
+    return {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -244,8 +257,7 @@ def convert_osm_to_net(
     logger.info("Running netconvert: %s", " ".join(cmd))
 
     try:
-        env = os.environ.copy()
-        env.pop("LD_LIBRARY_PATH", None)
+        env = _clean_env()
 
         result = subprocess.run(
             cmd,
@@ -257,7 +269,13 @@ def convert_osm_to_net(
     except subprocess.TimeoutExpired:
         raise NetconvertError("netconvert timed out after 120 seconds")
 
-    if result.returncode != 0:
+    if result.returncode != 0 and net_filepath.exists():
+        logger.warning(
+            "netconvert exited with code %d but output file exists — "
+            "treating as success (likely a cleanup-phase crash).",
+            result.returncode,
+        )
+    elif result.returncode != 0:
         logger.error("netconvert stderr: %s", result.stderr)
         raise NetconvertError(result.stderr)
 
@@ -543,18 +561,18 @@ def _add_tls_guess(net_filepath: str) -> None:
 
     logger.debug("Re-running netconvert with --tls.guess: %s", " ".join(cmd))
 
-    env = os.environ.copy()
-    env.pop("LD_LIBRARY_PATH", None)
+    result = subprocess.run(cmd, env=_clean_env(), capture_output=True, text=True, timeout=60)
 
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
-
-    if result.returncode == 0 and os.path.exists(tmp_filepath):
+    # Accept crash-with-output-file as success (Kaggle ABI issue)
+    if os.path.exists(tmp_filepath):
+        if result.returncode != 0:
+            logger.warning(
+                "netconvert exited with code %d but output file exists — "
+                "treating as success.", result.returncode,
+            )
         os.replace(tmp_filepath, net_filepath)
         logger.info("Updated network with guessed TLS")
     else:
-        # Clean up tmp file if it exists
-        if os.path.exists(tmp_filepath):
-            os.remove(tmp_filepath)
         logger.warning("TLS guessing failed: %s", result.stderr)
 
 

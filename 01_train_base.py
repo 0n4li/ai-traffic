@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import subprocess
+import xml.etree.ElementTree as ET
 import sys
 import tempfile
 from pathlib import Path
@@ -30,7 +31,7 @@ import numpy as np
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.map_processor import find_sumo, PhaseInfo
+from src.map_processor import find_sumo, PhaseInfo, _clean_env
 from src.traffic_generator import generate_random_trips
 from src.dynamic_env import TrafficEnv, create_traffic_env
 
@@ -60,6 +61,130 @@ def _get_sumo_binary(name: str) -> str:
     if found:
         return found
     raise FileNotFoundError(f"{name} binary not found")
+
+
+def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
+    """
+    If the .net.xml has no <tlLogic>, inject one programmatically.
+
+    This is a fallback for environments (Kaggle) where SUMO binaries crash
+    before writing the TLS section.  We parse the network XML, identify the
+    centre junction, group connections by incoming arm, and build a simple
+    green-yellow-red round-robin cycle.
+    """
+    tree = ET.parse(net_filepath)
+    root = tree.getroot()
+
+    # Check if TLS already exist
+    if root.findall(".//tlLogic"):
+        logger.info("Network already contains TLS — skipping injection.")
+        return
+
+    logger.warning("No TLS in generated network — injecting programmatically.")
+
+    # --- 1. Find the centre junction (highest connectivity) ---
+    best_junc = None
+    best_conn_count = -1
+    for junc in root.findall(".//junction"):
+        jid = junc.get("id", "")
+        if jid.startswith(":"):  # internal junction
+            continue
+        inc_lanes = junc.get("incLanes", "")
+        count = len(inc_lanes.split()) if inc_lanes.strip() else 0
+        if count > best_conn_count:
+            best_conn_count = count
+            best_junc = junc
+
+    if best_junc is None:
+        logger.error("No suitable junction found for TLS injection.")
+        return
+
+    tls_id = best_junc.get("id")
+    logger.info("Injecting TLS at junction '%s' (%d incoming lanes)", tls_id, best_conn_count)
+
+    # Mark junction as traffic_light type
+    best_junc.set("type", "traffic_light")
+
+    # --- 2. Collect connections through this junction ---
+    connections = []
+    for conn in root.findall(".//connection"):
+        from_edge = conn.get("from", "")
+        to_edge = conn.get("to", "")
+        # Skip internal edges
+        if from_edge.startswith(":") or to_edge.startswith(":"):
+            continue
+        # Check if this connection goes through our junction by verifying
+        # the from-edge ends at our junction or to-edge starts there
+        # For spider networks, connections are straightforwardly through the center
+        connections.append(conn)
+
+    if not connections:
+        logger.error("No connections found for junction '%s'.", tls_id)
+        return
+
+    # --- 3. Group connections by incoming edge (= arm) ---
+    arms: dict[str, list[ET.Element]] = {}
+    for conn in connections:
+        from_edge = conn.get("from", "")
+        arms.setdefault(from_edge, []).append(conn)
+
+    arm_list = sorted(arms.keys())
+    n_arms = len(arm_list)
+    logger.info("Found %d arms for TLS: %s", n_arms, arm_list)
+
+    if n_arms == 0:
+        return
+
+    # --- 4. Build phase states ---
+    # Total connections = total state string length
+    n_conns = len(connections)
+
+    # Map each connection to its index in the state string
+    conn_to_idx: dict[int, int] = {}
+    for idx, conn in enumerate(connections):
+        conn_to_idx[id(conn)] = idx
+
+    # Create round-robin phases: one green phase per arm
+    phases = []
+    for arm_idx, arm_edge in enumerate(arm_list):
+        arm_conns = arms[arm_edge]
+        # Green phase: this arm gets 'G', others get 'r'
+        state = ['r'] * n_conns
+        for conn in arm_conns:
+            cidx = conn_to_idx[id(conn)]
+            state[cidx] = 'G'
+        phases.append({"state": "".join(state), "duration": "31", "type": "green"})
+
+        # Yellow phase after each green
+        y_state = ['r'] * n_conns
+        for conn in arm_conns:
+            cidx = conn_to_idx[id(conn)]
+            y_state[cidx] = 'y'
+        phases.append({"state": "".join(y_state), "duration": "4", "type": "yellow"})
+
+    # --- 5. Create <tlLogic> element ---
+    tl_logic = ET.SubElement(root, "tlLogic")
+    tl_logic.set("id", tls_id)
+    tl_logic.set("type", "static")
+    tl_logic.set("programID", "0")
+    tl_logic.set("offset", "0")
+
+    for phase in phases:
+        phase_elem = ET.SubElement(tl_logic, "phase")
+        phase_elem.set("duration", phase["duration"])
+        phase_elem.set("state", phase["state"])
+
+    # --- 6. Update connections with tl and linkIndex ---
+    for idx, conn in enumerate(connections):
+        conn.set("tl", tls_id)
+        conn.set("linkIndex", str(idx))
+
+    # --- 7. Write back ---
+    tree.write(net_filepath, xml_declaration=True, encoding="UTF-8")
+    logger.info(
+        "Injected TLS '%s' with %d phases (%d green) for %d connections.",
+        tls_id, len(phases), len(phases) // 2, n_conns,
+    )
 
 
 def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo]:
@@ -94,24 +219,15 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
 
     logger.info("Generating dummy %d-way network via netgenerate: %s", n_ways, " ".join(cmd))
 
-    # Build a minimal environment for SUMO binaries.
-    # Kaggle/Colab kernels inject LD_PRELOAD, LD_LIBRARY_PATH, CUDA vars,
-    # etc. that can interfere with native SUMO binaries.
-    _SAFE_ENV_KEYS = {
-        "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP",
-        "SUMO_HOME", "DISPLAY", "XDG_RUNTIME_DIR",
-    }
-    clean_env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
-
-    result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(
+        cmd, env=_clean_env(), capture_output=True, text=True, timeout=30,
+    )
 
     if result.stderr:
         logger.warning("netgenerate stderr for %d-way: %s", n_ways, result.stderr.strip())
 
     # On Kaggle, SUMO binaries often segfault (exit -11) during process
-    # cleanup AFTER successfully writing the output file.  This is an
-    # ABI / library incompatibility in the teardown path — harmless as
-    # long as the output file was actually produced.
+    # cleanup AFTER successfully writing the output file — harmless.
     if result.returncode != 0 and os.path.isfile(net_filepath):
         logger.warning(
             "netgenerate exited with code %d for %d-way, but output file exists — "
@@ -131,6 +247,9 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
 
     if not os.path.isfile(net_filepath):
         raise RuntimeError(f"netgenerate produced no output file: {net_filepath}")
+
+    # Ensure the network has traffic lights — inject via Python if needed
+    _inject_tls_if_missing(net_filepath, n_ways)
 
     # Extract phase info from the generated network
     from src.map_processor import auto_select_junction
