@@ -244,8 +244,12 @@ def convert_osm_to_net(
     logger.info("Running netconvert: %s", " ".join(cmd))
 
     try:
+        env = os.environ.copy()
+        env.pop("LD_LIBRARY_PATH", None)
+
         result = subprocess.run(
             cmd,
+            env=env,
             capture_output=True,
             text=True,
             timeout=120,
@@ -539,7 +543,10 @@ def _add_tls_guess(net_filepath: str) -> None:
 
     logger.debug("Re-running netconvert with --tls.guess: %s", " ".join(cmd))
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
 
     if result.returncode == 0 and os.path.exists(tmp_filepath):
         os.replace(tmp_filepath, net_filepath)

@@ -131,8 +131,12 @@ def generate_random_trips(
     logger.debug("Command: %s", " ".join(cmd))
 
     try:
+        env = os.environ.copy()
+        env.pop("LD_LIBRARY_PATH", None)
+
         result = subprocess.run(
             cmd,
+            env=env,
             capture_output=True,
             text=True,
             timeout=120,

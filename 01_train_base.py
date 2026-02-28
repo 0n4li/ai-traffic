@@ -143,7 +143,13 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     ]
 
     logger.info("Generating dummy %d-way network via netconvert: %s", n_ways, " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    
+    # Kaggle's LD_LIBRARY_PATH can mess up SUMO's netconvert (segfault)
+    import os
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
 
     if result.stderr:
         logger.warning("netconvert stderr for %d-way: %s", n_ways, result.stderr.strip())
