@@ -62,58 +62,12 @@ def _get_sumo_binary(name: str) -> str:
     raise FileNotFoundError(f"{name} binary not found")
 
 
-def _write_nod_xml(filepath: str, n_ways: int, arm_length: float = 200.0) -> None:
-    """
-    Write a SUMO .nod.xml file with a central traffic-light node
-    and N arm-endpoint nodes arranged radially.
-    """
-    lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<nodes>',
-        '    <node id="C" x="0.00" y="0.00" type="traffic_light"/>',
-    ]
-    for i in range(n_ways):
-        angle = 2 * math.pi * i / n_ways
-        x = arm_length * math.cos(angle)
-        y = arm_length * math.sin(angle)
-        lines.append(f'    <node id="N{i}" x="{x:.2f}" y="{y:.2f}" type="priority"/>')
-    lines.append('</nodes>')
-    with open(filepath, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-def _write_edg_xml(filepath: str, n_ways: int, num_lanes: int = 2, speed: float = 13.89) -> None:
-    """
-    Write a SUMO .edg.xml file with bidirectional edges between
-    each arm-endpoint and the central node.
-    """
-    lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<edges>',
-    ]
-    for i in range(n_ways):
-        # Inbound: arm → center
-        lines.append(
-            f'    <edge id="N{i}_to_C" from="N{i}" to="C" '
-            f'numLanes="{num_lanes}" speed="{speed}"/>'
-        )
-        # Outbound: center → arm
-        lines.append(
-            f'    <edge id="C_to_N{i}" from="C" to="N{i}" '
-            f'numLanes="{num_lanes}" speed="{speed}"/>'
-        )
-    lines.append('</edges>')
-    with open(filepath, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
 def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo]:
     """
     Generate a synthetic SUMO network for a given N-way intersection.
 
-    Primary approach: write .nod.xml / .edg.xml programmatically, then
-    compile with netconvert. This avoids netgenerate which can segfault
-    on certain platforms (e.g. Kaggle).
+    Primary approach: generate grid via netgenerate. This avoids netconvert 
+    which can segfault on certain platforms (e.g. Kaggle) when parsing XML.
 
     Args:
         n_ways: Number of arms on the intersection (3, 4, or 5).
@@ -125,24 +79,20 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     os.makedirs(output_dir, exist_ok=True)
     net_filepath = os.path.join(output_dir, f"dummy_{n_ways}way.net.xml")
 
-    # --- Write node and edge XML files ---
-    nod_file = os.path.join(output_dir, f"dummy_{n_ways}way.nod.xml")
-    edg_file = os.path.join(output_dir, f"dummy_{n_ways}way.edg.xml")
-
-    _write_nod_xml(nod_file, n_ways, arm_length=200.0)
-    _write_edg_xml(edg_file, n_ways, num_lanes=2)
-
-    # --- Compile with netconvert ---
-    netconvert = _get_sumo_binary("netconvert")
+    # --- Compile with netgenerate ---
+    netgenerate = _get_sumo_binary("netgenerate")
     cmd = [
-        netconvert,
-        "--node-files", nod_file,
-        "--edge-files", edg_file,
+        netgenerate,
+        "--spider",
+        "--spider.arm-number", str(n_ways),
+        "--spider.circle-number", "1",
+        "--spider.space-radius", "150",
         "--output-file", net_filepath,
         "--tls.default-type", "static",
+        "--junctions.join"
     ]
 
-    logger.info("Generating dummy %d-way network via netconvert: %s", n_ways, " ".join(cmd))
+    logger.info("Generating dummy %d-way network via netgenerate: %s", n_ways, " ".join(cmd))
     
     # Kaggle's LD_LIBRARY_PATH can mess up SUMO's netconvert (segfault)
     env = os.environ.copy()
@@ -151,14 +101,14 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
 
     if result.stderr:
-        logger.warning("netconvert stderr for %d-way: %s", n_ways, result.stderr.strip())
+        logger.warning("netgenerate stderr for %d-way: %s", n_ways, result.stderr.strip())
     if result.returncode != 0:
         raise RuntimeError(
-            f"netconvert failed for {n_ways}-way (exit code {result.returncode}): {result.stderr}"
+            f"netgenerate failed for {n_ways}-way (exit code {result.returncode}): {result.stderr}"
         )
 
     if not os.path.isfile(net_filepath):
-        raise RuntimeError(f"netconvert produced no output file: {net_filepath}")
+        raise RuntimeError(f"netgenerate produced no output file: {net_filepath}")
 
     # Extract phase info from the generated network
     from src.map_processor import auto_select_junction
