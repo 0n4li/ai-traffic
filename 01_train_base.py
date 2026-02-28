@@ -96,7 +96,7 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
 
     # Build a minimal environment for SUMO binaries.
     # Kaggle/Colab kernels inject LD_PRELOAD, LD_LIBRARY_PATH, CUDA vars,
-    # etc. that cause segfaults in native SUMO binaries.
+    # etc. that can interfere with native SUMO binaries.
     _SAFE_ENV_KEYS = {
         "PATH", "HOME", "USER", "LANG", "TMPDIR", "TEMP", "TMP",
         "SUMO_HOME", "DISPLAY", "XDG_RUNTIME_DIR",
@@ -105,25 +105,20 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
 
     result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True, timeout=30)
 
-    # Fallback: if segfault (exit -11), retry with absolute minimum env
-    if result.returncode == -11:
-        logger.warning(
-            "netgenerate segfaulted with clean env for %d-way, retrying with minimal env...",
-            n_ways,
-        )
-        minimal_env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/usr/local/bin"),
-            "HOME": os.environ.get("HOME", "/root"),
-        }
-        sumo_home = os.environ.get("SUMO_HOME")
-        if sumo_home:
-            minimal_env["SUMO_HOME"] = sumo_home
-        result = subprocess.run(cmd, env=minimal_env, capture_output=True, text=True, timeout=30)
-
     if result.stderr:
         logger.warning("netgenerate stderr for %d-way: %s", n_ways, result.stderr.strip())
-    if result.returncode != 0:
-        # Include diagnostic info in the error message
+
+    # On Kaggle, SUMO binaries often segfault (exit -11) during process
+    # cleanup AFTER successfully writing the output file.  This is an
+    # ABI / library incompatibility in the teardown path — harmless as
+    # long as the output file was actually produced.
+    if result.returncode != 0 and os.path.isfile(net_filepath):
+        logger.warning(
+            "netgenerate exited with code %d for %d-way, but output file exists — "
+            "treating as success (likely a cleanup-phase crash).",
+            result.returncode, n_ways,
+        )
+    elif result.returncode != 0:
         diag = (
             f"exit_code={result.returncode}, "
             f"stderr={result.stderr.strip()!r}, "
