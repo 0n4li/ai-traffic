@@ -15,31 +15,30 @@
 
 ---
 
-## Step 2: Upload Project Files
+## Step 2: Choose Your Code Upload Method
 
-**Option A — Upload as a Dataset (Recommended)**
+You only need to do **one** of these options to get the code onto Kaggle.
+
+### Option A: Upload as a Kaggle Dataset (Recommended for stability)
 
 1. Go to [kaggle.com/datasets](https://www.kaggle.com/datasets) → **+ New Dataset**
-2. Name it `ai-traffic-source`
-3. Upload the entire project folder:
-   ```
-   src/map_processor.py
-   src/traffic_generator.py
-   src/dynamic_env.py
-   src/traffic_baseline.py
-   src/__init__.py
-   01_train_base.py
-   02_evaluate_map.py
-   ```
-4. In the notebook, click **+ Add data** (right sidebar) → search `ai-traffic-source` → **Add**
-5. Your files will be at `/kaggle/input/ai-traffic-source/`
+2. Name it `ai-traffic-source` and upload your local files.
+3. In your notebook, click **+ Add data** (right sidebar) → search `ai-traffic-source` → **Add**
+4. Your files will be at `/kaggle/input/ai-traffic-source/`
 
-**Option B — Paste Directly**
+### Option B: Paste Directly (Quickest for single files)
 
-Create cells in the notebook and paste each file using `%%writefile`:
+Create a cell for each file and use `%%writefile`:
 ```python
 %%writefile src/map_processor.py
 # paste contents here...
+```
+
+### Option C: Git Clone (Best for public repos)
+
+Run this in a cell to pull from GitHub:
+```python
+!git clone https://github.com/0n4li/ai-traffic.git /kaggle/working/ai-traffic
 ```
 
 ---
@@ -79,40 +78,48 @@ print(f"✅ GPU: {subprocess.getoutput('nvidia-smi --query-gpu=name --format=csv
 
 ---
 
-## Step 4: Set Up Project Structure
+## Step 4: Set Up Workspace
+
+This cell organizes your files into the correct directory structure. Run this after uploading/cloning.
 
 ```python
-# Cell 2: Copy source files into working directory
-import shutil
+# Cell 2: Setup Workspace
+import shutil, os, sys
 
 WORK_DIR = "/kaggle/working/ai-traffic"
-INPUT_DIR = "/kaggle/input/ai-traffic-source"  # adjust if different
+INPUT_DIR = "/kaggle/input/ai-traffic-source"
 
-os.makedirs(f"{WORK_DIR}/src", exist_ok=True)
+# Path 1: If using Git Clone (Option C), it's already in WORK_DIR
+if os.path.exists(WORK_DIR):
+    print("✅ Found Git repository")
+
+# Path 2: If using Dataset (Option A), copy files to WORK_DIR
+elif os.path.exists(INPUT_DIR):
+    print("✅ Copying files from Dataset...")
+    os.makedirs(f"{WORK_DIR}/src", exist_ok=True)
+    # Copy src files
+    for f in os.listdir(f"{INPUT_DIR}/src"):
+        shutil.copy2(f"{INPUT_DIR}/src/{f}", f"{WORK_DIR}/src/{f}")
+    # Copy root files
+    for f in ["01_train_base.py", "02_evaluate_map.py"]:
+        if os.path.exists(f"{INPUT_DIR}/{f}"):
+            shutil.copy2(f"{INPUT_DIR}/{f}", f"{WORK_DIR}/{f}")
+
+# Path 3: If using %%writefile (Option B) manually
+else:
+    print("⚠️ Please ensure files were created via %%writefile")
+    os.makedirs(f"{WORK_DIR}/src", exist_ok=True)
+
+# Create standard data/model directories
 os.makedirs(f"{WORK_DIR}/data/maps", exist_ok=True)
 os.makedirs(f"{WORK_DIR}/data/routes", exist_ok=True)
 os.makedirs(f"{WORK_DIR}/models", exist_ok=True)
-
-# Copy source files
-for f in ["__init__.py", "map_processor.py", "traffic_generator.py",
-          "dynamic_env.py", "traffic_baseline.py"]:
-    src = os.path.join(INPUT_DIR, "src", f)
-    dst = os.path.join(WORK_DIR, "src", f)
-    if os.path.exists(src):
-        shutil.copy2(src, dst)
-
-for f in ["01_train_base.py", "02_evaluate_map.py"]:
-    src = os.path.join(INPUT_DIR, f)
-    dst = os.path.join(WORK_DIR, f)
-    if os.path.exists(src):
-        shutil.copy2(src, dst)
 
 os.chdir(WORK_DIR)
 sys.path.insert(0, WORK_DIR)
 
 print(f"✅ Working directory: {os.getcwd()}")
-print(f"✅ Files: {os.listdir('.')}")
-print(f"✅ Src:   {os.listdir('src')}")
+print(f"✅ Ready to train/evaluate")
 ```
 
 ---
@@ -123,71 +130,34 @@ print(f"✅ Src:   {os.listdir('src')}")
 
 ```python
 # Cell 3: Train base models
-from src.map_processor import find_sumo
-find_sumo()  # Verify SUMO is found
-
-# Train 3-way, 4-way, and 5-way base models
 !python 01_train_base.py --topologies 3 4 5 --timesteps 100000 --verbose 1
 ```
-
-After training, you'll see `base_3way.zip`, `base_4way.zip`, `base_5way.zip` in `/kaggle/working/ai-traffic/models/`.
-
-> [!TIP]
-> To save training time during testing, reduce timesteps: `--timesteps 10000`
 
 ---
 
 ## Step 6: Run the Demo
 
 ```python
-# Cell 4: Run evaluation on a real intersection
-from src.map_processor import find_sumo
-find_sumo()
-
-# Option A: Use a famous junction (no internet needed for geocoding)
+# Cell 4: Run evaluation
 !python 02_evaluate_map.py --location "Silk Board Junction Bangalore"
-
-# Option B: Use exact coordinates
-# !python 02_evaluate_map.py --lat 12.9170 --lon 77.6227
-
-# Option C: With animation capture (slower, needs virtual display)
-# !python 02_evaluate_map.py --location "Silk Board Junction Bangalore" --animate
 ```
 
 ---
 
-## Step 7: View Results
+## Handling Code Changes
 
-The dashboard image is saved automatically:
-
+### Option 1: Update via Git (Easiest)
 ```python
-# Cell 5: Display results
-from IPython.display import Image, display
-display(Image("data/dashboard.png"))
+!cd /kaggle/working/ai-traffic && git pull
 ```
 
----
+### Option 2: Update via Dataset
+Upload a new version to Kaggle, click "Update Data Sources" in the notebook, and re-run **Cell 2**.
 
-## Quick Reference: All in One Cell
-
-If you want to run everything in a single cell (after setup):
-
+### Option 3: Quick Fixes (`%%writefile`)
 ```python
-# All-in-one demo
-import os, sys
-os.chdir("/kaggle/working/ai-traffic")
-sys.path.insert(0, ".")
-
-from src.map_processor import process_osm_file, find_sumo
-from src.traffic_generator import generate_random_trips
-from src.traffic_baseline import run_baseline_from_phase_info
-from src.dynamic_env import create_traffic_env
-
-find_sumo()
-
-# Process a junction
-from _02_evaluate_map import run_demo
-run_demo(location="Silk Board Junction Bangalore")
+%%writefile src/dynamic_env.py
+# paste updated contents here...
 ```
 
 ---
@@ -196,19 +166,7 @@ run_demo(location="Silk Board Junction Bangalore")
 
 | Issue | Fix |
 |---|---|
-| `SumoNotFoundError` | Re-run Cell 1 (install step). Verify with `!which netconvert` |
+| `SumoNotFoundError` | Re-run Cell 1 (install step) |
 | `No module named 'traci'` | Run `sys.path.insert(0, "/usr/share/sumo/tools")` |
-| `No module named 'src'` | Run `os.chdir("/kaggle/working/ai-traffic")` and `sys.path.insert(0, ".")` |
-| `ModuleNotFoundError: stable_baselines3` | Run `!pip install stable-baselines3` |
-| `No base model found` | Run Cell 3 (training) first before Cell 4 (evaluation) |
-| GPU not detected | Notebook settings → Accelerator → GPU T4 x2 |
-| OSM download fails | Check internet access. Kaggle notebooks have internet enabled by default |
-| `pyvirtualdisplay` fails | Only needed for `--animate` flag. Simulation runs fine without it |
-
----
-
-## Saving Your Work
-
-- **Models persist** in `/kaggle/working/` between runs (with Persistence = Files)
-- To download models: click the **Output** tab → download `models/base_4way.zip`
-- To reuse trained models: upload them as a Kaggle dataset and add to your notebook
+| `No base model found` | Run Cell 3 (training) first |
+| `FileNotFound` | Check if you copied the files correctly in Cell 2 |
