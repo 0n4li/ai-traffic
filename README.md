@@ -111,17 +111,26 @@ elif os.path.exists(INPUT_DIR):
     print("✅ Copying files from Dataset...")
     os.makedirs(f"{WORK_DIR}/src", exist_ok=True)
     # Copy src files
-    for f in os.listdir(f"{INPUT_DIR}/src"):
-        shutil.copy2(f"{INPUT_DIR}/src/{f}", f"{WORK_DIR}/src/{f}")
+    if os.path.exists(f"{INPUT_DIR}/src"):
+        for f in os.listdir(f"{INPUT_DIR}/src"):
+            shutil.copy2(f"{INPUT_DIR}/src/{f}", f"{WORK_DIR}/src/{f}")
     # Copy root files
-    for f in ["01_train_base.py", "02_evaluate_map.py"]:
-        if os.path.exists(f"{INPUT_DIR}/{f}"):
+    for f in os.listdir(INPUT_DIR):
+        if os.path.isfile(f"{INPUT_DIR}/{f}"):
             shutil.copy2(f"{INPUT_DIR}/{f}", f"{WORK_DIR}/{f}")
 
 # Path 3: If using %%writefile (Option B) manually
 else:
-    print("⚠️ Please ensure files were created via %%writefile")
+    print("📦 Organizing files from %%writefile...")
     os.makedirs(f"{WORK_DIR}/src", exist_ok=True)
+    # Move Python scripts from root to WORK_DIR
+    for f in os.listdir("/kaggle/working"):
+        if f.endswith(".py") and f != "__main__.py":
+            shutil.move(f"/kaggle/working/{f}", f"{WORK_DIR}/{f}")
+    # Move src folder items if they were created in /kaggle/working/src
+    if os.path.exists("/kaggle/working/src") and "/kaggle/working/src" != f"{WORK_DIR}/src":
+        for f in os.listdir("/kaggle/working/src"):
+            shutil.move(f"/kaggle/working/src/{f}", f"{WORK_DIR}/src/{f}")
 
 # Create standard data/model directories
 os.makedirs(f"{WORK_DIR}/data/maps", exist_ok=True)
