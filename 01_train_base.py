@@ -80,51 +80,57 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     netgenerate = _get_netgenerate_binary()
 
     if n_ways == 3:
-        # T-intersection: use spider with 3 arms
+        # T-intersection: use spider with 3 arms, omit center to avoid trivial-network issues
         cmd = [
             netgenerate,
             "--spider",
             "--spider.arm-number", "3",
             "--spider.circle-number", "1",
             "--spider.space-radius", "100",
+            "--spider-omit-center",
             "--default.lanenumber", "2",
             "--default-junction-type", "traffic_light",
             "--tls.default-type", "static",
             "--output-file", net_filepath,
         ]
     elif n_ways == 4:
-        # Standard 4-way cross
+        # Standard 4-way crossroads via grid (--cross doesn't exist in netgenerate)
         cmd = [
             netgenerate,
-            "--cross",
-            "--cross.number", "1",
-            "--cross.length", "200",
+            "--grid",
+            "--grid.x-number", "2",
+            "--grid.y-number", "2",
+            "--grid.x-length", "200",
+            "--grid.y-length", "200",
+            "--grid.attach-length", "200",
             "--default.lanenumber", "2",
             "--default-junction-type", "traffic_light",
             "--tls.default-type", "static",
             "--output-file", net_filepath,
         ]
     elif n_ways == 5:
-        # 5-arm spider intersection
+        # 5-arm spider intersection, omit center per SUMO recommendation
         cmd = [
             netgenerate,
             "--spider",
             "--spider.arm-number", "5",
             "--spider.circle-number", "1",
             "--spider.space-radius", "100",
+            "--spider-omit-center",
             "--default.lanenumber", "2",
             "--default-junction-type", "traffic_light",
             "--tls.default-type", "static",
             "--output-file", net_filepath,
         ]
     else:
-        # Generic spider for any N
+        # Generic spider for any N, omit center for stability
         cmd = [
             netgenerate,
             "--spider",
             "--spider.arm-number", str(n_ways),
             "--spider.circle-number", "1",
             "--spider.space-radius", "100",
+            "--spider-omit-center",
             "--default.lanenumber", "2",
             "--default-junction-type", "traffic_light",
             "--tls.default-type", "static",
@@ -134,8 +140,10 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     logger.info("Generating dummy %d-way network: %s", n_ways, " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
+    if result.stderr:
+        logger.warning("netgenerate stderr for %d-way: %s", n_ways, result.stderr.strip())
     if result.returncode != 0:
-        raise RuntimeError(f"netgenerate failed for {n_ways}-way: {result.stderr}")
+        raise RuntimeError(f"netgenerate failed for {n_ways}-way (exit code {result.returncode}): {result.stderr}")
 
     # Extract phase info from the generated network
     from src.map_processor import auto_select_junction
