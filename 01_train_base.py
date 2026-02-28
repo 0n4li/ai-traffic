@@ -63,14 +63,79 @@ def _get_sumo_binary(name: str) -> str:
     raise FileNotFoundError(f"{name} binary not found")
 
 
+def _rebuild_via_netconvert(net_filepath: str) -> bool:
+    """
+    Re-process a .net.xml through netconvert to rebuild junction logic.
+
+    When netgenerate segfaults on Kaggle, the output has edge/junction
+    geometry but is MISSING junction logic (request/response elements,
+    internal edges).  Running netconvert on the existing file rebuilds
+    these structures and optionally adds TLS via --tls.guess.
+
+    Returns True if the rebuild produced a valid file.
+    """
+    try:
+        netconvert = _get_sumo_binary("netconvert")
+    except FileNotFoundError:
+        logger.warning("netconvert not found — cannot rebuild network.")
+        return False
+
+    tmp_filepath = net_filepath + ".rebuilt.tmp"
+
+    cmd = [
+        netconvert,
+        "--sumo-net-file", net_filepath,
+        "--output-file", tmp_filepath,
+        "--tls.guess",
+        "--tls.join",
+        "--tls.default-type", "static",
+    ]
+
+    logger.info(
+        "Rebuilding network via netconvert (to fix junction logic + add TLS): %s",
+        " ".join(cmd),
+    )
+
+    try:
+        result = subprocess.run(
+            cmd, env=_clean_env(), capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("netconvert rebuild timed out.")
+        return False
+
+    if result.stderr:
+        logger.debug("netconvert rebuild stderr: %s", result.stderr.strip())
+
+    # Accept crash-with-output as success (Kaggle ABI issue)
+    if os.path.isfile(tmp_filepath) and os.path.getsize(tmp_filepath) > 100:
+        if result.returncode != 0:
+            logger.warning(
+                "netconvert rebuild exited with code %d but output exists — "
+                "treating as success.",
+                result.returncode,
+            )
+        os.replace(tmp_filepath, net_filepath)
+        logger.info("Network rebuilt successfully with junction logic + TLS.")
+        return True
+    else:
+        logger.warning(
+            "netconvert rebuild failed (exit=%d): %s",
+            result.returncode, result.stderr.strip(),
+        )
+        # Clean up partial file
+        if os.path.isfile(tmp_filepath):
+            os.unlink(tmp_filepath)
+        return False
+
+
 def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
     """
-    If the .net.xml has no <tlLogic>, inject one programmatically.
+    Last-resort TLS injection via pure Python XML patching.
 
-    This is a fallback for environments (Kaggle) where SUMO binaries crash
-    before writing the TLS section.  We parse the network XML, identify the
-    centre junction, group connections by incoming arm, and build a simple
-    green-yellow-red round-robin cycle.
+    Only used if netconvert rebuild also fails.  Adds <tlLogic>,
+    updates connection tl/linkIndex attributes, and adds a <request>
+    element to the junction so SUMO can at least load the file.
     """
     tree = ET.parse(net_filepath)
     root = tree.getroot()
@@ -80,7 +145,7 @@ def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
         logger.info("Network already contains TLS — skipping injection.")
         return
 
-    logger.warning("No TLS in generated network — injecting programmatically.")
+    logger.warning("No TLS in generated network — injecting programmatically (last-resort fallback).")
 
     # --- 1. Find the centre junction (highest connectivity) ---
     best_junc = None
@@ -113,9 +178,6 @@ def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
         # Skip internal edges
         if from_edge.startswith(":") or to_edge.startswith(":"):
             continue
-        # Check if this connection goes through our junction by verifying
-        # the from-edge ends at our junction or to-edge starts there
-        # For spider networks, connections are straightforwardly through the center
         connections.append(conn)
 
     if not connections:
@@ -136,10 +198,7 @@ def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
         return
 
     # --- 4. Build phase states ---
-    # Total connections = total state string length
     n_conns = len(connections)
-
-    # Map each connection to its index in the state string
     conn_to_idx: dict[int, int] = {}
     for idx, conn in enumerate(connections):
         conn_to_idx[id(conn)] = idx
@@ -179,7 +238,20 @@ def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
         conn.set("tl", tls_id)
         conn.set("linkIndex", str(idx))
 
-    # --- 7. Write back ---
+    # --- 7. Add <request> element to junction if missing ---
+    # This provides the right-of-way logic SUMO needs to load the file.
+    existing_request = best_junc.find("request")
+    if existing_request is None:
+        for i in range(n_conns):
+            req = ET.SubElement(best_junc, "request")
+            req.set("index", str(i))
+            # All-green response: no conflicts (TLS handles conflicts)
+            req.set("response", "0" * n_conns)
+            req.set("foes", "0" * n_conns)
+            req.set("cont", "0")
+        logger.info("Added %d <request> elements to junction '%s'.", n_conns, tls_id)
+
+    # --- 8. Write back ---
     tree.write(net_filepath, xml_declaration=True, encoding="UTF-8")
     logger.info(
         "Injected TLS '%s' with %d phases (%d green) for %d connections.",
@@ -191,8 +263,10 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     """
     Generate a synthetic SUMO network for a given N-way intersection.
 
-    Primary approach: generate grid via netgenerate. This avoids netconvert 
-    which can segfault on certain platforms (e.g. Kaggle) when parsing XML.
+    Strategy (handles Kaggle segfaults):
+        1. Run netgenerate to create raw spider network geometry
+        2. Re-process through netconvert to rebuild junction logic + add TLS
+        3. If netconvert also fails, fall back to Python TLS injection
 
     Args:
         n_ways: Number of arms on the intersection (3, 4, or 5).
@@ -204,7 +278,7 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     os.makedirs(output_dir, exist_ok=True)
     net_filepath = os.path.join(output_dir, f"dummy_{n_ways}way.net.xml")
 
-    # --- Compile with netgenerate ---
+    # --- Step 1: Generate raw geometry with netgenerate ---
     netgenerate = _get_sumo_binary("netgenerate")
     cmd = [
         netgenerate,
@@ -214,7 +288,7 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
         "--spider.space-radius", "150",
         "--output-file", net_filepath,
         "--tls.default-type", "static",
-        "--junctions.join"
+        "--junctions.join",
     ]
 
     logger.info("Generating dummy %d-way network via netgenerate: %s", n_ways, " ".join(cmd))
@@ -248,8 +322,18 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     if not os.path.isfile(net_filepath):
         raise RuntimeError(f"netgenerate produced no output file: {net_filepath}")
 
-    # Ensure the network has traffic lights — inject via Python if needed
-    _inject_tls_if_missing(net_filepath, n_ways)
+    # --- Step 2: Rebuild via netconvert (fixes junction logic + adds TLS) ---
+    # This is critical when netgenerate segfaults and produces incomplete
+    # .net.xml missing junction logic (request/response elements).
+    rebuilt = _rebuild_via_netconvert(net_filepath)
+
+    if not rebuilt:
+        # --- Step 3: Last-resort Python fallback ---
+        logger.warning(
+            "netconvert rebuild failed — falling back to Python TLS injection. "
+            "Network may have issues if junction logic is missing."
+        )
+        _inject_tls_if_missing(net_filepath, n_ways)
 
     # Extract phase info from the generated network
     from src.map_processor import auto_select_junction

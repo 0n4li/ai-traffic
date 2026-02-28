@@ -213,6 +213,7 @@ class TrafficEnv(gym.Env):
         # State tracking
         self.traci = None
         self._sumo_running = False
+        self._traci_label: str | None = None  # Track connection label for cleanup
         self._prev_action = np.full(self.n_phases, 0.5, dtype=np.float32)
         self._cycle_count = 0
         self._total_sim_time = 0.0
@@ -259,12 +260,26 @@ class TrafficEnv(gym.Env):
         # Use a unique label for this connection
         label = f"env_{id(self)}"
         try:
+            # Clean up any stale connection with this label
+            try:
+                traci.switch(label)
+                traci.close()
+            except (traci.exceptions.TraCIException, Exception):
+                pass
             traci.start(sumo_cmd, label=label)
             self._conn = traci.getConnection(label)
+            self._traci_label = label
         except Exception:
             # Fallback: try without label for older SUMO versions
+            # Clean up any stale default connection first
+            try:
+                traci.switch("default")
+                traci.close()
+            except Exception:
+                pass
             traci.start(sumo_cmd)
             self._conn = traci
+            self._traci_label = "default"
 
         self._sumo_running = True
         self._prev_action = np.full(self.n_phases, 0.5, dtype=np.float32)
@@ -471,10 +486,13 @@ class TrafficEnv(gym.Env):
         """Close the SUMO simulation if running."""
         if self._sumo_running and self.traci:
             try:
+                if self._traci_label:
+                    self.traci.switch(self._traci_label)
                 self._conn.close()
             except Exception:
                 pass
             self._sumo_running = False
+            self._traci_label = None
 
     def close(self) -> None:
         """Close the environment and SUMO."""
