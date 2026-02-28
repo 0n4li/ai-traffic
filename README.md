@@ -1,3 +1,16 @@
+# AI-Adaptive Traffic Signal Controller
+
+A Reinforcement Learning (RL) system engineered to dynamically adjust traffic light countdown timers at real-world intersections to minimize average vehicle wait times.
+
+## 🚀 Overview
+
+This project uses **Proximal Policy Optimization (PPO)** and **Eclipse SUMO** to optimize signal timings. It supports real-world map ingestion via OpenStreetMap (OSM) and features a three-tier execution strategy (Zero-Shot inference, Fine-Tuning, or Training from scratch).
+
+> [!NOTE]
+> For a deep dive into the architecture, MDP formulation, and design decisions, see the [**REQUIREMENTS.md**](REQUIREMENTS.md).
+
+---
+
 # Running on Kaggle — Step-by-Step Instructions
 
 ## Prerequisites
