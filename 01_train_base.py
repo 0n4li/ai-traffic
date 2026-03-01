@@ -169,18 +169,22 @@ def _inject_tls_if_missing(net_filepath: str, n_ways: int) -> None:
     # Mark junction as traffic_light type
     best_junc.set("type", "traffic_light")
 
-    # --- 2. Collect connections through this junction ---
+    # --- 2. Collect connections at this junction ---
+    # We must filter to only include connections where the 'from' edge
+    # actually ends at our target junction.
+    inc_lanes = best_junc.get("incLanes", "").split()
+    inc_edges = {lane.rsplit("_", 1)[0] for lane in inc_lanes if "_" in lane}
+
     connections = []
     for conn in root.findall(".//connection"):
         from_edge = conn.get("from", "")
-        to_edge = conn.get("to", "")
-        # Skip internal edges
-        if from_edge.startswith(":") or to_edge.startswith(":"):
+        # Filter: only connections departing from edges entering THIS junction
+        if from_edge not in inc_edges:
             continue
         connections.append(conn)
 
     if not connections:
-        logger.error("No connections found for junction '%s'.", tls_id)
+        logger.error("No connections found for junction '%s' (incoming arms: %s).", tls_id, inc_edges)
         return
 
     # --- 3. Group connections by incoming edge (= arm) ---
