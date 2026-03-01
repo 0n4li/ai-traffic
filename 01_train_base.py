@@ -86,7 +86,6 @@ def _rebuild_via_netconvert(net_filepath: str) -> bool:
         netconvert,
         "--sumo-net-file", net_filepath,
         "--output-file", tmp_filepath,
-        "--tls.guess",
         "--tls.join",
         "--tls.default-type", "static",
     ]
@@ -322,18 +321,15 @@ def generate_dummy_network(n_ways: int, output_dir: str) -> tuple[str, PhaseInfo
     if not os.path.isfile(net_filepath):
         raise RuntimeError(f"netgenerate produced no output file: {net_filepath}")
 
-    # --- Step 2: Rebuild via netconvert (fixes junction logic + adds TLS) ---
-    # This is critical when netgenerate segfaults and produces incomplete
-    # .net.xml missing junction logic (request/response elements).
-    rebuilt = _rebuild_via_netconvert(net_filepath)
+    # --- Step 2: Mandatory Python TLS Injection ---
+    # We inject the TLS first to ensure a consistent, N-phase round-robin
+    # signal structure across all topologies (guarantees action space size).
+    _inject_tls_if_missing(net_filepath, n_ways)
 
-    if not rebuilt:
-        # --- Step 3: Last-resort Python fallback ---
-        logger.warning(
-            "netconvert rebuild failed — falling back to Python TLS injection. "
-            "Network may have issues if junction logic is missing."
-        )
-        _inject_tls_if_missing(net_filepath, n_ways)
+    # --- Step 3: Rebuild via netconvert (fixes junction logic) ---
+    # This computes the complex right-of-way rules (request/response matrix)
+    # for the TLS we just injected. 
+    _rebuild_via_netconvert(net_filepath)
 
     # Extract phase info from the generated network
     from src.map_processor import auto_select_junction
